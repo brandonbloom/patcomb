@@ -20,7 +20,17 @@
           env)
         (assoc env sym subject)))))
 
+(defn as [sym matcher]
+  (assert (symbol? sym))
+  (assert (satisfies? Matcher matcher))
+  (reify Matcher
+    (-match [_ env subject]
+      (assert env)
+      (when-let [env* (-match matcher env subject)]
+        (assoc env* sym subject)))))
+
 (defn pattern [matcher]
+  (assert (satisfies? Matcher matcher))
   (reify Matcher
     (-match [_ env subject]
       (if env
@@ -38,5 +48,6 @@
   (is (= (match (pattern (const 5)) 0) nil))
   (is (= (match (pattern (blank 'x)) 5) {'x 5}))
   (is (= (match (pattern (pattern (blank 'x))) 5) {}))
+  (is (= (match (pattern (as 'x (const 1))) 1) {'x 1}))
 
 )
