@@ -1,15 +1,24 @@
-(ns patcomb.core)
+(ns patcomb.core
+  (:refer-clojure :exclude [compile]))
 
-(defmulti -match (fn [form env subject]
-                   (if (seq? form)
-                     (first form)
-                     (class form))))
+(defn head [x]
+  (if (seq? x)
+    (first x)
+    (class x)))
+
+(defmulti -match (fn [form env subject] (head form)))
+
+(defmulti -proc (fn [form subject] (head form)))
 
 (defmethod -match 'const
   [[_ x] env subject]
   (assert env)
   (when (= x subject)
     env))
+
+(defmethod -proc 'const
+  [[_ x] subject]
+  [[:test `(= ~x ~subject)]])
 
 (defmethod -match 'blank
   [[_ sym] env subject]
@@ -20,6 +29,10 @@
       env)
     (assoc env sym subject)))
 
+(defmethod -proc 'blank
+  [[_ sym] subject]
+  [[:bind sym subject]])
+
 (defmethod -match 'as
   [[_ sym subpat] env subject]
   (assert (symbol? sym))
@@ -27,9 +40,18 @@
   (when-let [env* (-match subpat env subject)]
     (assoc env* sym subject)))
 
+(defmethod -proc 'as
+  [[_ sym subpat] subject]
+  (concat (-proc (list 'blank sym subject))
+          (-proc subpat subject)))
+
 (defmethod -match java.lang.Long
   [value env subject]
   (-match (list 'const value) env subject))
+
+(defmethod -proc java.lang.Long
+  [value subject]
+  (-proc (list 'const value) subject))
 
 (defmethod -match clojure.lang.PersistentVector
   [subpats env subject]
@@ -40,8 +62,19 @@
             env
             (map vector subpats subject))))
 
+(defmethod -proc clojure.lang.PersistentVector
+  [subpats subject]
+  (let [n (count subpats)]
+    (concat [[:test `(vector? ~subject)]
+             [:test `(= ~n (count ~subject))]]
+            (for [[i subpat] (map vector (range n) subpats)
+                  :let [sym (symbol (str subject "__" i))]
+                  foo (cons [:bind sym `(nth ~subject ~i)]
+                            (-proc subpat sym))]
+              foo))))
+
 ;TODO some kind of generic traversal/zip thing for matching composites
-;;TODO -compile
+;;TODO -proc
 
 (defn match [pattern subject]
   (-match pattern {} subject))
@@ -51,11 +84,18 @@
   (require '[clojure.test :refer [is]])
 
   (is (= (match '(const 5) 5) {}))
+  (is (= (match '5 5) {}))
   (is (= (match '(const 5) 0) nil))
   (is (= (match '(blank x) 5) {'x 5}))
   (is (= (match '(as x (const 1)) 1) {'x 1}))
   (is (= (match '[] []) {}))
   (is (= (match '[(blank x) 10] [5 10]) {'x 5}))
   (is (= (match '[(blank x) 10] [5 11]) nil))
+
+  (->
+    (-proc '[1 (blank x) [3] (blank x) 1] 'foo)
+    fipp.edn/pprint
+    )
+
 
 )
