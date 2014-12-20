@@ -42,7 +42,7 @@
 
 (defmethod -proc 'as
   [[_ sym subpat] subject]
-  (concat (-proc (list 'blank sym subject))
+  (concat (-proc (list 'blank sym) subject)
           (-proc subpat subject)))
 
 (defmethod -match java.lang.Long
@@ -80,7 +80,7 @@
   (-match pattern {} subject))
 
 (defn compile [pattern subject]
-  (let [proc (-proc pattern subject)
+  (let [proc (-proc pattern '__subject)
         {:keys [k names]}
         (reduce (fn [state [op & args]]
                   (case op
@@ -106,23 +106,35 @@
                 proc)
         expr (reduce (fn [x f]
                        (f x))
-                     (into {} (map #(vector (list 'quote %) %) names))
+                     (into {} (for [sym names
+                                    :when (not (re-find #"^__" (str sym)))]
+                                [(list 'quote sym) sym]))
                      (reverse k))]
-    expr
-    ))
+    `(let [~'__subject ~subject]
+       ~expr)))
+
+(defn run [pattern subject]
+  (eval (compile pattern subject)))
 
 (comment
 
-  (require '[clojure.test :refer [is]])
+  (require '[clojure.test :refer [is are]])
 
-  (is (= (match '(const 5) 5) {}))
-  (is (= (match '5 5) {}))
-  (is (= (match '(const 5) 0) nil))
-  (is (= (match '(blank x) 5) {'x 5}))
-  (is (= (match '(as x (const 1)) 1) {'x 1}))
-  (is (= (match '[] []) {}))
-  (is (= (match '[(blank x) 10] [5 10]) {'x 5}))
-  (is (= (match '[(blank x) 10] [5 11]) nil))
+  (are [pattern subject substitutions]
+       (= (match pattern subject) (run pattern subject) substitutions)
+
+       '(const 5)                 5           {}
+       '5                         5           {}
+       '(const 5)                 0           nil
+       '(blank x)                 5           {'x 5}
+       '(as x (const 1))          1           {'x 1}
+       '[]                        []          {}
+       '[(blank x) 10]            [5 10]      {'x 5}
+       '[(blank x) 10]            [5 11]      nil
+       '[(blank x) (blank x)]     [3 3]       {'x 3}
+       '[(blank x) (blank x)]     [3 5]       nil
+
+       )
 
   (->
     (compile '[1 (blank x) [3] (blank x) 1] 'foo)
