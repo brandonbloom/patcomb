@@ -6,82 +6,71 @@
     (first x)
     (class x)))
 
-(defmulti -match (fn [form env subject] (head form)))
+(def ^:dynamic eq)
+(def ^:dynamic isvec)
+(def ^:dynamic cnt)
+(def ^:dynamic check)
+(def ^:dynamic *env*)
+(def ^:dynamic fail)
 
-(defmulti -proc (fn [form subject] (head form)))
+(defmulti match! (fn [form subject] (head form)))
 
-(defmethod -match 'const
-  [[_ x] env subject]
-  (when (= x subject)
-    env))
-
-(defmethod -proc 'const
+(defmethod match! 'const
   [[_ x] subject]
-  [[:test `(= ~x ~subject)]])
+  (check (eq x subject)))
 
-(defmethod -match 'blank
-  [[_ sym] env subject]
-  (assert (symbol? sym))
-  (if-let [x (env sym)]
-    (when (= x subject)
-      env)
-    (assoc env sym subject)))
-
-(defmethod -proc 'blank
+(defmethod match! 'blank
   [[_ sym] subject]
-  [[:bind sym subject]])
-
-(defmethod -match 'as
-  [[_ sym subpat] env subject]
   (assert (symbol? sym))
-  (when-let [env* (-match subpat env subject)]
-    (assoc env* sym subject)))
+  (if-let [x (*env* sym)]
+    (check (eq x subject))
+    (set! *env* (assoc *env* sym subject))))
 
-(defmethod -proc 'as
+(defmethod match! 'as
   [[_ sym subpat] subject]
-  (concat (-proc (list 'blank sym) subject)
-          (-proc subpat subject)))
+  (assert (symbol? sym))
+  (set! *env* (assoc *env* sym subject))
+  (match! subpat subject))
 
-(defmethod -match java.lang.Long
-  [value env subject]
-  (-match (list 'const value) env subject))
-
-(defmethod -proc java.lang.Long
+(defmethod match! java.lang.Long
   [value subject]
-  (-proc (list 'const value) subject))
+  (match! (list 'const value) subject))
 
-(defmethod -match clojure.lang.PersistentVector
-  [subpats env subject]
-  (when (and (vector? subject) (= (count subpats) (count subject)))
-    (reduce (fn [env [pattern subject]]
-              (-match pattern env subject))
-            env
-            (map vector subpats subject))))
-
-(defmethod -proc clojure.lang.PersistentVector
+(defmethod match! clojure.lang.PersistentVector
   [subpats subject]
-  (let [n (count subpats)]
-    (concat [[:test `(vector? ~subject)]
-             [:test `(= ~n (count ~subject))]]
-            (for [[i subpat] (map vector (range n) subpats)
-                  :let [sym (symbol (str subject "__" i))]
-                  foo (cons [:bind sym `(nth ~subject ~i)]
-                            (-proc subpat sym))]
-              foo))))
+  (check (isvec subject)) ;TODO abstract
+  (check (eq (cnt subpats) (cnt subject)))
+  (doseq [[pattern subject] (map vector subpats subject)]
+    (match! pattern subject)))
 
-(defmethod -match 'alt
-  [[_ & subpats] env subject]
-  (some #(-match % env subject) subpats))
+(def failed (ex-info "match failed" {}))
 
-(defmethod -proc 'alt
+(defn match* [pattern subject]
+  (binding [*env* *env*]
+    (try
+      (match! pattern subject)
+      *env*
+      (catch clojure.lang.ExceptionInfo e
+        (when-not (identical? e failed)
+          (throw))))))
+
+(defmethod match! 'alt
   [[_ & subpats] subject]
-  [(into [:alt] (map #(-proc % subject) subpats))])
-
-;TODO some kind of generic traversal/zip thing for matching composites
-;;TODO -proc
+  (set! *env* (some #(match* % subject) subpats)))
 
 (defn match [pattern subject]
-  (-match pattern {} subject))
+  (binding [eq =
+            isvec vector?
+            cnt count
+            check #(when-not % (fail))
+            *env* {}
+            fail #(throw failed)]
+    (try
+      (match! pattern subject)
+      *env*
+      (catch clojure.lang.ExceptionInfo e
+        (when-not (identical? e failed)
+          (throw))))))
 
 (defn proc->clj [proc names]
   (let [{:keys [k names]}
@@ -120,22 +109,22 @@
                        [(list 'quote sym) sym]))
             (reverse k))))
 
-(defn compile
-  [pattern subject]
-  (let [proc (-proc pattern '__subject)
-        expr (proc->clj proc #{})]
-    `(let [~'__subject ~subject]
-       ~expr)))
-
-(defn run [pattern subject]
-  (eval (compile pattern subject)))
+;(defn compile
+;  [pattern subject]
+;  (let [proc (-proc pattern '__subject)
+;        expr (proc->clj proc #{})]
+;    `(let [~'__subject ~subject]
+;       ~expr)))
+;
+;(defn run [pattern subject]
+;  (eval (compile pattern subject)))
 
 (comment
 
   (require '[clojure.test :refer [is are]])
 
   (are [pattern subject substitutions]
-       (= (match pattern subject) (run pattern subject) substitutions)
+       (= (match pattern subject) #_(run pattern subject) substitutions)
 
        ;; explicit literal values
        '(const 5)                 5           {}
