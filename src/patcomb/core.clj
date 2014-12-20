@@ -79,19 +79,22 @@
 (defn match [pattern subject]
   (-match pattern {} subject))
 
-(defn run [pattern subject]
+(defn compile [pattern subject]
   (let [proc (-proc pattern subject)
         {:keys [k names]}
         (reduce (fn [state [op & args]]
                   (case op
                     :bind
                     (let [[sym init] args]
-                      ;;TODO if name already exists.. check that.
-                      (-> state
-                         (update-in [:names] conj sym)
-                         (update-in [:k] conj (fn [x]
-                                                `(let [~sym ~init]
-                                                   ~x)))))
+                      (if-let [existing (get-in state [:names sym])]
+                        (update-in state [:k] conj (fn [x]
+                                                     `(when (= ~existing ~init)
+                                                        ~x)))
+                        (-> state
+                           (update-in [:names] conj sym)
+                           (update-in [:k] conj (fn [x]
+                                                  `(let [~sym ~init]
+                                                     ~x))))))
                     :test
                     (let [[expr] args]
                       (update-in state [:k] conj (fn [x]
@@ -122,8 +125,8 @@
   (is (= (match '[(blank x) 10] [5 11]) nil))
 
   (->
-    (run '[1 (blank x) [3] (blank x) 1] 'foo)
-    fipp.clojure/pprint
+    (compile '[1 (blank x) [3] (blank x) 1] 'foo)
+    (fipp.clojure/pprint {:width 150})
     )
 
 )
