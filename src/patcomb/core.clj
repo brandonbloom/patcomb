@@ -12,7 +12,6 @@
 
 (defmethod -match 'const
   [[_ x] env subject]
-  (assert env)
   (when (= x subject)
     env))
 
@@ -22,7 +21,6 @@
 
 (defmethod -match 'blank
   [[_ sym] env subject]
-  (assert env)
   (assert (symbol? sym))
   (if-let [x (env sym)]
     (when (= x subject)
@@ -36,7 +34,6 @@
 (defmethod -match 'as
   [[_ sym subpat] env subject]
   (assert (symbol? sym))
-  (assert env)
   (when-let [env* (-match subpat env subject)]
     (assoc env* sym subject)))
 
@@ -55,7 +52,6 @@
 
 (defmethod -match clojure.lang.PersistentVector
   [subpats env subject]
-  (assert env)
   (when (and (vector? subject) (= (count subpats) (count subject)))
     (reduce (fn [env [pattern subject]]
               (-match pattern env subject))
@@ -73,15 +69,22 @@
                             (-proc subpat sym))]
               foo))))
 
+(defmethod -match 'alt
+  [[_ & subpats] env subject]
+  (some #(-match % env subject) subpats))
+
+(defmethod -proc 'alt
+  [[_ & subpats] subject]
+  [(into [:alt] (map #(-proc % subject) subpats))])
+
 ;TODO some kind of generic traversal/zip thing for matching composites
 ;;TODO -proc
 
 (defn match [pattern subject]
   (-match pattern {} subject))
 
-(defn compile [pattern subject]
-  (let [proc (-proc pattern '__subject)
-        {:keys [k names]}
+(defn proc->clj [proc names]
+  (let [{:keys [k names]}
         (reduce (fn [state [op & args]]
                   (case op
                     :bind
@@ -100,16 +103,24 @@
                       (update-in state [:k] conj (fn [x]
                                                    `(when ~expr
                                                       ~x))))
+                    :alt
+                    (update-in state [:k] conj (fn [x]
+                                                 `(or ~@(map #(proc->clj % (:names state)) args))))
                     ))
                 {:k []
-                 :names #{}}
-                proc)
-        expr (reduce (fn [x f]
-                       (f x))
-                     (into {} (for [sym names
-                                    :when (not (re-find #"^__" (str sym)))]
-                                [(list 'quote sym) sym]))
-                     (reverse k))]
+                 :names names}
+                proc)]
+    (reduce (fn [x f]
+              (f x))
+            (into {} (for [sym names
+                           :when (not (re-find #"^__" (str sym)))]
+                       [(list 'quote sym) sym]))
+            (reverse k))))
+
+(defn compile
+  [pattern subject]
+  (let [proc (-proc pattern '__subject)
+        expr (proc->clj proc #{})]
     `(let [~'__subject ~subject]
        ~expr)))
 
@@ -134,10 +145,14 @@
        '[(blank x) (blank x)]     [3 3]       {'x 3}
        '[(blank x) (blank x)]     [3 5]       nil
 
+       '(alt (as x 1) (as y 2))   1           {'x 1}
+       '(alt (as x 1) (as y 2))   2           {'y 2}
+       '(alt (as x 1) (as y 2))   3           nil
+
        )
 
   (->
-    (compile '[1 (blank x) [3] (blank x) 1] 'foo)
+    (compile '[1 (blank x) [3] (blank x) (alt (as y 1) 2)] 'foo)
     (fipp.clojure/pprint {:width 150})
     )
 
