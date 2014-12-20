@@ -105,6 +105,9 @@
                                                       ~x))))
                     :alt
                     (update-in state [:k] conj (fn [x]
+                                                 ;;XXX This doesn't use the x arg, but still works because the
+                                                 ; recursion supplies the names map construction code. Will
+                                                 ; break when more interesting success code is wanted.
                                                  `(or ~@(map #(proc->clj % (:names state)) args))))
                     ))
                 {:k []
@@ -134,17 +137,29 @@
   (are [pattern subject substitutions]
        (= (match pattern subject) (run pattern subject) substitutions)
 
+       ;; explicit literal values
        '(const 5)                 5           {}
-       '5                         5           {}
        '(const 5)                 0           nil
+
+       ;; numbers are already literal
+       '5                         5           {}
+       '5                         0           nil
+
+       ;; named blanks
        '(blank x)                 5           {'x 5}
-       '(as x (const 1))          1           {'x 1}
+
+       ;; named patterns
+       '(as x 1)                  1           {'x 1}
+
+       ;; vectors of subpatterns
        '[]                        []          {}
+       '[1]                       []          nil
        '[(blank x) 10]            [5 10]      {'x 5}
        '[(blank x) 10]            [5 11]      nil
        '[(blank x) (blank x)]     [3 3]       {'x 3}
        '[(blank x) (blank x)]     [3 5]       nil
 
+       ;; ordered choice
        '(alt (as x 1) (as y 2))   1           {'x 1}
        '(alt (as x 1) (as y 2))   2           {'y 2}
        '(alt (as x 1) (as y 2))   3           nil
