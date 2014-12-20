@@ -79,6 +79,35 @@
 (defn match [pattern subject]
   (-match pattern {} subject))
 
+(defn run [pattern subject]
+  (let [proc (-proc pattern subject)
+        {:keys [k names]}
+        (reduce (fn [state [op & args]]
+                  (case op
+                    :bind
+                    (let [[sym init] args]
+                      ;;TODO if name already exists.. check that.
+                      (-> state
+                         (update-in [:names] conj sym)
+                         (update-in [:k] conj (fn [x]
+                                                `(let [~sym ~init]
+                                                   ~x)))))
+                    :test
+                    (let [[expr] args]
+                      (update-in state [:k] conj (fn [x]
+                                                   `(when ~expr
+                                                      ~x))))
+                    ))
+                {:k []
+                 :names #{}}
+                proc)
+        expr (reduce (fn [x f]
+                       (f x))
+                     (into {} (map #(vector (list 'quote %) %) names))
+                     (reverse k))]
+    expr
+    ))
+
 (comment
 
   (require '[clojure.test :refer [is]])
@@ -93,9 +122,8 @@
   (is (= (match '[(blank x) 10] [5 11]) nil))
 
   (->
-    (-proc '[1 (blank x) [3] (blank x) 1] 'foo)
-    fipp.edn/pprint
+    (run '[1 (blank x) [3] (blank x) 1] 'foo)
+    fipp.clojure/pprint
     )
-
 
 )
