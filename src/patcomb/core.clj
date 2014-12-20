@@ -6,12 +6,15 @@
     (first x)
     (class x)))
 
-(def ^:dynamic eq)
-(def ^:dynamic isvec)
-(def ^:dynamic cnt)
+;; these really should be open/polymorphic versions of their core functions.
+(def ^:dynamic eq)    ; =
+(def ^:dynamic isvec) ; vector?
+(def ^:dynamic cnt)   ; count
+
+;; pattern matching effects
 (def ^:dynamic check)
-(def ^:dynamic *env*)
 (def ^:dynamic fail)
+(def ^:dynamic *env*) ; state
 
 (defmulti match! (fn [form subject] (head form)))
 
@@ -58,57 +61,62 @@
   [[_ & subpats] subject]
   (set! *env* (some #(match* % subject) subpats)))
 
-(defn match [pattern subject]
+(defn interp [pattern subject]
   (binding [eq =
             isvec vector?
             cnt count
             check #(when-not % (fail))
-            *env* {}
             fail #(throw failed)]
-    (try
-      (match! pattern subject)
-      *env*
-      (catch clojure.lang.ExceptionInfo e
-        (when-not (identical? e failed)
-          (throw))))))
+    (match* pattern subject)))
 
-(defn proc->clj [proc names]
-  (let [{:keys [k names]}
-        (reduce (fn [state [op & args]]
-                  (case op
-                    :bind
-                    (let [[sym init] args]
-                      (if-let [existing (get-in state [:names sym])]
-                        (update-in state [:k] conj (fn [x]
-                                                     `(when (= ~existing ~init)
-                                                        ~x)))
-                        (-> state
-                           (update-in [:names] conj sym)
-                           (update-in [:k] conj (fn [x]
-                                                  `(let [~sym ~init]
-                                                     ~x))))))
-                    :test
-                    (let [[expr] args]
-                      (update-in state [:k] conj (fn [x]
-                                                   `(when ~expr
-                                                      ~x))))
-                    :alt
-                    (update-in state [:k] conj (fn [x]
-                                                 ;;XXX This doesn't use the x arg, but still works because the
-                                                 ; recursion supplies the names map construction code. Will
-                                                 ; break when more interesting success code is wanted.
-                                                 `(or ~@(map #(proc->clj % (:names state)) args))))
-                    ))
-                {:k []
-                 :names names}
-                proc)]
-    (reduce (fn [x f]
-              (f x))
-            (into {} (for [sym names
-                           :when (not (re-find #"^__" (str sym)))]
-                       [(list 'quote sym) sym]))
-            (reverse k))))
+(defn compiled [pattern subject]
+  (binding [
+            ;eq emit-equiv-check
+            ;isvec emit-vector-check
+            ;cnt emit-count
+            ;check abstract when-not => fail
+            ;fail backtrack accumulator to last match*, then resume continuation
+            ]
+    (match* pattern subject)
+    ))
 
+;(defn proc->clj [proc names]
+;  (let [{:keys [k names]}
+;        (reduce (fn [state [op & args]]
+;                  (case op
+;                    :bind
+;                    (let [[sym init] args]
+;                      (if-let [existing (get-in state [:names sym])]
+;                        (update-in state [:k] conj (fn [x]
+;                                                     `(when (= ~existing ~init)
+;                                                        ~x)))
+;                        (-> state
+;                           (update-in [:names] conj sym)
+;                           (update-in [:k] conj (fn [x]
+;                                                  `(let [~sym ~init]
+;                                                     ~x))))))
+;                    :test
+;                    (let [[expr] args]
+;                      (update-in state [:k] conj (fn [x]
+;                                                   `(when ~expr
+;                                                      ~x))))
+;                    :alt
+;                    (update-in state [:k] conj (fn [x]
+;                                                 ;;XXX This doesn't use the x arg, but still works because the
+;                                                 ; recursion supplies the names map construction code. Will
+;                                                 ; break when more interesting success code is wanted.
+;                                                 `(or ~@(map #(proc->clj % (:names state)) args))))
+;                    ))
+;                {:k []
+;                 :names names}
+;                proc)]
+;    (reduce (fn [x f]
+;              (f x))
+;            (into {} (for [sym names
+;                           :when (not (re-find #"^__" (str sym)))]
+;                       [(list 'quote sym) sym]))
+;            (reverse k))))
+;
 ;(defn compile
 ;  [pattern subject]
 ;  (let [proc (-proc pattern '__subject)
@@ -124,7 +132,7 @@
   (require '[clojure.test :refer [is are]])
 
   (are [pattern subject substitutions]
-       (= (match pattern subject) #_(run pattern subject) substitutions)
+       (= (interp pattern subject) #_(run pattern subject) substitutions)
 
        ;; explicit literal values
        '(const 5)                 5           {}
