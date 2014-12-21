@@ -1,64 +1,30 @@
-(ns patcomb.core
-  (:refer-clojure :exclude [compile]))
+(ns patcomb.core)
 
 (defn head [x]
   (if (seq? x)
     (first x)
     (class x)))
 
-(defmulti -match (fn [form env subject] (head form)))
+(defmulti pat->proc (fn [form subject] (head form)))
 
-(defmulti -proc (fn [form subject] (head form)))
-
-(defmethod -match 'const
-  [[_ x] env subject]
-  (when (= x subject)
-    env))
-
-(defmethod -proc 'const
+(defmethod pat->proc 'const
   [[_ x] subject]
   [[:test `(= ~x ~subject)]])
 
-(defmethod -match 'blank
-  [[_ sym] env subject]
-  (assert (symbol? sym))
-  (if-let [x (env sym)]
-    (when (= x subject)
-      env)
-    (assoc env sym subject)))
-
-(defmethod -proc 'blank
+(defmethod pat->proc 'blank
   [[_ sym] subject]
   [[:bind sym subject]])
 
-(defmethod -match 'as
-  [[_ sym subpat] env subject]
-  (assert (symbol? sym))
-  (when-let [env* (-match subpat env subject)]
-    (assoc env* sym subject)))
-
-(defmethod -proc 'as
+(defmethod pat->proc 'as
   [[_ sym subpat] subject]
-  (concat (-proc (list 'blank sym) subject)
-          (-proc subpat subject)))
+  (concat (pat->proc (list 'blank sym) subject)
+          (pat->proc subpat subject)))
 
-(defmethod -match java.lang.Long
-  [value env subject]
-  (-match (list 'const value) env subject))
-
-(defmethod -proc java.lang.Long
+(defmethod pat->proc java.lang.Long
   [value subject]
-  (-proc (list 'const value) subject))
+  (pat->proc (list 'const value) subject))
 
-(defmethod -match clojure.lang.PersistentVector
-  [subpats env subject]
-  (when (and (vector? subject) (= (count subpats) (count subject)))
-    (reduce (fn [env [pattern subject]]
-              (-match pattern env subject))
-            env
-            (map vector subpats subject))))
-
-(defmethod -proc clojure.lang.PersistentVector
+(defmethod pat->proc clojure.lang.PersistentVector
   [subpats subject]
   (let [n (count subpats)]
     (concat [[:test `(vector? ~subject)]
@@ -66,92 +32,99 @@
             (for [[i subpat] (map vector (range n) subpats)
                   :let [sym (symbol (str subject "__" i))]
                   foo (cons [:bind sym `(nth ~subject ~i)]
-                            (-proc subpat sym))]
+                            (pat->proc subpat sym))]
               foo))))
 
-(defmethod -match 'alt
-  [[_ & subpats] env subject]
-  (some #(-match % env subject) subpats))
-
-(defmethod -proc 'alt
+(defmethod pat->proc 'alt
   [[_ & subpats] subject]
-  [(into [:alt] (map #(-proc % subject) subpats))])
+  [(into [:alt] (map #(pat->proc % subject) subpats))])
 
-;TODO some kind of generic traversal/zip thing for matching composites
-;;TODO -proc
+(defmethod pat->proc 'rule
+  [[_ lhs rhs] subject]
+  (concat (pat->proc lhs subject)
+          [[:return rhs]]))
+
+(defmethod pat->proc 'guard
+  [[_ pattern expr] subject]
+  (concat (pat->proc pattern subject)
+          [[:test expr]]))
+
+(defmethod pat->proc 'check
+  [[_ pattern pred] subject]
+  (assert (symbol? pred))
+  (let [temp (symbol (str subject "__" pred))]
+    (concat (pat->proc pattern subject)
+            [[:bind temp subject]
+             [:test (list pred temp)]])))
+
+(defmulti cmd->clj (fn [k [op & args]] op))
+
+(def ^:dynamic *names* nil)
+
+(defn proc->clj [proc k]
+  (binding [*names* (or *names* #{})]
+    (let [proc* (concat proc [[:success]])]
+      ((reduce cmd->clj k proc*) nil))))
+
+(defmethod cmd->clj :bind
+  [k [_ sym init]]
+  (if-let [existing (*names* sym)]
+    (fn [x] (k `(when (= ~existing ~init) ~x)))
+    (do
+      (set! *names* (conj *names* sym))
+      (fn [x] (k `(let [~sym ~init] ~x))))))
+
+(defmethod cmd->clj :test
+  [k [_ expr]]
+  (fn [x] (k `(when ~expr ~x))))
+
+(defmethod cmd->clj :alt
+  [k [_ & subprocs]]
+  (fn [x] (k `(or ~@(mapv #(proc->clj % identity) subprocs)))))
+
+(defmethod cmd->clj :return
+  [k [_ expr]]
+  (fn [_] (k expr)))
+
+(defmethod cmd->clj :success
+  [k _]
+  (let [names *names*]
+    (fn [_]
+      (k (into {} (for [sym names
+                        :when (not (re-find #"^__" (str sym)))]
+                    [(list 'quote sym) sym]))))))
+
+(defn match->clj
+  [pattern subject]
+  (let [proc (pat->proc pattern '__subject)
+        k (fn [x] `(let [~'__subject ~subject] ~x))]
+    (proc->clj proc k)))
 
 (defn match [pattern subject]
-  (-match pattern {} subject))
-
-(defn proc->clj [proc names]
-  (let [{:keys [k names]}
-        (reduce (fn [state [op & args]]
-                  (case op
-                    :bind
-                    (let [[sym init] args]
-                      (if-let [existing (get-in state [:names sym])]
-                        (update-in state [:k] conj (fn [x]
-                                                     `(when (= ~existing ~init)
-                                                        ~x)))
-                        (-> state
-                           (update-in [:names] conj sym)
-                           (update-in [:k] conj (fn [x]
-                                                  `(let [~sym ~init]
-                                                     ~x))))))
-                    :test
-                    (let [[expr] args]
-                      (update-in state [:k] conj (fn [x]
-                                                   `(when ~expr
-                                                      ~x))))
-                    :alt
-                    (update-in state [:k] conj (fn [x]
-                                                 ;;XXX This doesn't use the x arg, but still works because the
-                                                 ; recursion supplies the names map construction code. Will
-                                                 ; break when more interesting success code is wanted.
-                                                 `(or ~@(map #(proc->clj % (:names state)) args))))
-                    ))
-                {:k []
-                 :names names}
-                proc)]
-    (reduce (fn [x f]
-              (f x))
-            (into {} (for [sym names
-                           :when (not (re-find #"^__" (str sym)))]
-                       [(list 'quote sym) sym]))
-            (reverse k))))
-
-(defn compile
-  [pattern subject]
-  (let [proc (-proc pattern '__subject)
-        expr (proc->clj proc #{})]
-    `(let [~'__subject ~subject]
-       ~expr)))
-
-(defn run [pattern subject]
-  (eval (compile pattern subject)))
+  (eval (match->clj pattern subject)))
 
 (comment
 
   (require '[clojure.test :refer [is are]])
 
-  (are [pattern subject substitutions]
-       (= (match pattern subject) (run pattern subject) substitutions)
+  (are [pattern subject result]
+       (= (match pattern subject) result)
 
        ;; explicit literal values
-       '(const 5)                 5           {}
-       '(const 5)                 0           nil
+       '(const 5)    5     {}
+       '(const 5)    0     nil
 
        ;; numbers are already literal
-       '5                         5           {}
-       '5                         0           nil
+       '5     5     {}
+       '5     0     nil
 
-       ;; named blanks
-       '(blank x)                 5           {'x 5}
+       ;;; named blanks
+       '(blank x)   5   {'x 5}
 
-       ;; named patterns
-       '(as x 1)                  1           {'x 1}
+       ;;; named patterns
+       '(as x 1)    1   {'x 1}
 
-       ;; vectors of subpatterns
+       ;;; vectors of subpatterns
        '[]                        []          {}
        '[1]                       []          nil
        '[(blank x) 10]            [5 10]      {'x 5}
@@ -159,16 +132,39 @@
        '[(blank x) (blank x)]     [3 3]       {'x 3}
        '[(blank x) (blank x)]     [3 5]       nil
 
-       ;; ordered choice
-       '(alt (as x 1) (as y 2))   1           {'x 1}
-       '(alt (as x 1) (as y 2))   2           {'y 2}
-       '(alt (as x 1) (as y 2))   3           nil
+       ;;; ordered choice
+       '(alt (as x 1) (as y 2))         1       {'x 1}
+       '(alt (as x 1) (as y 2))         2       {'y 2}
+       '(alt (as x 1) (as y 2))         3       nil
+       '[(blank x) (alt (as y 1) 2)]    [1 2]   {'x 1}
+
+       ;;; rules
+       '(rule [(blank x) (blank y)] [y x])     [1 2]       [2 1]
+
+       ;;; guard expressions
+       '(guard (blank x) (< 3 x 5))    4    {'x 4}
+       '(guard (blank x) (< 3 x 5))    7    nil
+
+       ;; predicate checks
+       '(check (blank x) odd?)    3   {'x 3}
+       '(check (blank x) odd?)    4   nil
 
        )
 
   (->
-    (compile '[1 (blank x) [3] (blank x) (alt (as y 1) 2)] 'foo)
+    ;5
+    ;'(rule [(blank x) (blank y)] [y x])
+    '[1 (blank x) [3] (blank x) (alt (as y 1) 2)]
+    ;'[(blank x) (blank x)]
+    ;'(alt (as x 1) (as y 2))
+
+    ;(pat->proc 'foo)
+    ;(fipp.edn/pprint {:width 150})
+
+    (match->clj 'foo)
     (fipp.clojure/pprint {:width 150})
+
     )
 
 )
+
