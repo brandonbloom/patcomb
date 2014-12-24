@@ -7,6 +7,7 @@
     (class x)))
 
 (defmulti -match (fn [form env subject] (head form)))
+(defmulti -rewrite (fn [form env subject] (head form)))
 
 (defmethod -match 'const
   [[_ x] env subject]
@@ -43,15 +44,28 @@
   [[_ & subpats] env subject]
   (some #(-match % env subject) subpats))
 
+(defmethod -rewrite 'rule
+  [[_ lhs rhs] env subject]
+  (when-let [env (-match lhs env subject)]
+    (eval `(let [~@(mapcat (fn [[k v]] [k (list 'quote v)]) env)]
+             ~rhs))))
+
+(defmethod -rewrite 'alt
+  [[_ & subpats] env subject]
+  (some #(-rewrite % env subject) subpats))
+
 (defn match [pattern subject]
   (-match pattern {} subject))
+
+(defn rewrite [subject strategy]
+  (-rewrite strategy {} subject))
 
 (comment
 
   (require '[clojure.test :refer [is are]])
 
   (are [pattern subject substitutions]
-       (= (match pattern subject) (run pattern subject) substitutions)
+       (= (match pattern subject) substitutions)
 
        ;; explicit literal values
        '(const 5)                 5           {}
@@ -79,6 +93,20 @@
        '(alt (as x 1) (as y 2))   1           {'x 1}
        '(alt (as x 1) (as y 2))   2           {'y 2}
        '(alt (as x 1) (as y 2))   3           nil
+
+       )
+
+  (are [subject strategy result]
+       (= (rewrite subject strategy) result)
+
+       '5    '(rule 5 10)    10
+
+       '5    '(rule (as x 5) (inc x))    6
+
+       '[1 2]   '(rule [(blank x) (blank y)] [y x])    [2 1]
+
+       '2   '(rule (alt 1 2) 3)    3
+       '2   '(alt (rule 1 "x") (rule 2 "y"))    "y"
 
        )
 
