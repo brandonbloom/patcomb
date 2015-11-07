@@ -36,6 +36,7 @@
   [subpats env subject]
   (when (and (vector? subject) (= (count subpats) (count subject)))
     (reduce (fn [env [pattern subject]]
+              ;XXX handle early failure
               (-match pattern env subject))
             env
             (map vector subpats subject))))
@@ -46,19 +47,26 @@
 
 (defmethod -rewrite 'rule
   [[_ lhs rhs] env subject]
-  (when-let [env (-match lhs env subject)]
-    (eval `(let [~@(mapcat (fn [[k v]] [k (list 'quote v)]) env)]
-             ~rhs))))
+  (if-let [env (-match lhs env subject)]
+    (let [bindings (mapcat (fn [[k v]] [k (list 'quote v)]) env)]
+      (reduced (eval `(let [~@bindings] ~rhs))))
+    subject))
 
 (defmethod -rewrite 'alt
   [[_ & subpats] env subject]
-  (some #(-rewrite % env subject) subpats))
+  (reduce (fn [subject pat]
+            (-rewrite pat env subject))
+          subject
+          subpats))
 
 (defn match [pattern subject]
   (-match pattern {} subject))
 
 (defn rewrite [subject strategy]
-  (-rewrite strategy {} subject))
+  (let [result (-rewrite strategy {} subject)]
+    (if (reduced? result)
+      @result
+      result)))
 
 (comment
 
@@ -107,6 +115,8 @@
 
        '2   '(rule (alt 1 2) 3)    3
        '2   '(alt (rule 1 "x") (rule 2 "y"))    "y"
+
+       1   '(alt (rule 1 false) (rule 1 true))   false
 
        )
 
